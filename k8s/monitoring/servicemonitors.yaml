@@ -1,0 +1,74 @@
+---
+# ServiceMonitor for Camel Integration
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: camel-integration-monitor
+  namespace: file-pipeline
+  labels:
+    app.kubernetes.io/name: camel-integration
+    app.kubernetes.io/part-of: file-transfer-system
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: camel-integration
+  namespaceSelector:
+    matchNames:
+      - file-pipeline
+  endpoints:
+    - port: management
+      path: /q/metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      scheme: http
+      honorLabels: true
+      metricRelabelings:
+        - sourceLabels: [__name__]
+          regex: 'camel_.*|jvm_.*|http_server_.*'
+          action: keep
+---
+# ServiceMonitor for Docling Service
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: docling-monitor
+  namespace: file-pipeline
+  labels:
+    app.kubernetes.io/name: docling
+    app.kubernetes.io/part-of: file-transfer-system
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: docling
+  namespaceSelector:
+    matchNames:
+      - file-pipeline
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      scheme: http
+      honorLabels: true
+---
+# PodMonitor for AMQ Broker (uses pod-level metrics)
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: amq-broker-monitor
+  namespace: file-pipeline
+  labels:
+    app.kubernetes.io/name: amq-broker
+    app.kubernetes.io/part-of: file-transfer-system
+spec:
+  selector:
+    matchLabels:
+      ActiveMQArtemis: file-pipeline-broker
+  namespaceSelector:
+    matchNames:
+      - file-pipeline
+  podMetricsEndpoints:
+    - port: wconsj-0
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s

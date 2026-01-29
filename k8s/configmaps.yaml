@@ -1,0 +1,89 @@
+---
+# Docling service configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: docling-config
+  namespace: file-pipeline
+  labels:
+    app.kubernetes.io/name: docling
+    app.kubernetes.io/part-of: file-transfer-system
+data:
+  # Docling serve configuration
+  DOCLING_SERVE_ENABLE_UI: "false"
+  DOCLING_SERVE_MAX_WORKERS: "4"
+  DOCLING_SERVE_TIMEOUT: "300"
+  DOCLING_SERVE_LOG_LEVEL: "INFO"
+
+  # Model configuration
+  DOCLING_MODEL_PATH: "/models"
+  DOCLING_ENABLE_TABLE_STRUCTURE: "true"
+  DOCLING_ENABLE_OCR: "true"
+  DOCLING_OCR_ENGINE: "tesseract"
+
+  # Output format
+  DOCLING_OUTPUT_FORMAT: "json"
+  DOCLING_INCLUDE_IMAGES: "false"
+---
+# Camel integration configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: camel-config
+  namespace: file-pipeline
+  labels:
+    app.kubernetes.io/name: camel-integration
+    app.kubernetes.io/part-of: file-transfer-system
+data:
+  # Application settings
+  QUARKUS_HTTP_PORT: "8080"
+  QUARKUS_MANAGEMENT_PORT: "9000"
+  QUARKUS_LOG_LEVEL: "INFO"
+  QUARKUS_LOG_CATEGORY_ORG_APACHE_CAMEL: "INFO"
+
+  # JMS/AMQ settings
+  AMQ_BROKER_HOST: "file-pipeline-broker-all-0-svc"
+  AMQ_BROKER_PORT: "61618"
+  AMQ_QUEUE_NAME: "file-transfer-queue"
+  AMQ_DLQ_NAME: "file-transfer-dlq"
+
+  # S3 settings (bucket name comes from OBC secret)
+  S3_ENDPOINT_OVERRIDE: "https://s3.openshift-storage.svc"
+  S3_REGION: "us-east-1"
+  S3_PATH_STYLE_ACCESS: "true"
+
+  # Docling settings
+  DOCLING_SERVICE_URL: "http://docling-service:5001"
+  DOCLING_TIMEOUT_MS: "300000"
+
+  # Processing settings
+  MAX_RETRY_ATTEMPTS: "3"
+  RETRY_DELAY_MS: "5000"
+  CIRCUIT_BREAKER_THRESHOLD: "50"
+  CIRCUIT_BREAKER_TIMEOUT_MS: "60000"
+---
+# Logging configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logging-config
+  namespace: file-pipeline
+  labels:
+    app.kubernetes.io/name: logging
+    app.kubernetes.io/part-of: file-transfer-system
+data:
+  application-logging.properties: |
+    # Quarkus logging configuration
+    quarkus.log.console.enable=true
+    quarkus.log.console.format=%d{yyyy-MM-dd HH:mm:ss,SSS} %-5p [%c{3.}] (%t) %s%e%n
+    quarkus.log.console.level=INFO
+    quarkus.log.console.color=false
+
+    # Category-specific logging
+    quarkus.log.category."org.apache.camel".level=INFO
+    quarkus.log.category."io.quarkus".level=INFO
+    quarkus.log.category."org.apache.activemq".level=WARN
+
+    # JSON logging for production
+    quarkus.log.console.json=true
+    quarkus.log.console.json.pretty-print=false

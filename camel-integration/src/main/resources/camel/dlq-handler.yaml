@@ -1,0 +1,206 @@
+# =============================================================================
+# Dead Letter Queue Handler Route
+# =============================================================================
+# Handles messages that failed processing after all retry attempts.
+# Actions:
+# 1. Logs the failure with full context
+# 2. Stores failed message metadata to S3 for analysis
+# 3. Optionally sends notification
+# =============================================================================
+
+- route:
+    id: dlq-handler-route
+    description: "Dead Letter Queue handler for failed messages"
+    autoStartup: true
+
+    from:
+      uri: jms:queue:{{error.dlq.name}}
+      parameters:
+        acknowledgementModeName: CLIENT_ACKNOWLEDGE
+        maxConcurrentConsumers: "1"
+
+    steps:
+      # -------------------------------------------------------------------------
+      # Step 1: Extract failure context
+      # -------------------------------------------------------------------------
+      - setProperty:
+          name: originalFileName
+          expression:
+            simple:
+              expression: "${header.fileName}"
+      - setProperty:
+          name: correlationId
+          expression:
+            simple:
+              expression: "${header.JMSCorrelationID}"
+      - setProperty:
+          name: failureTimestamp
+          expression:
+            simple:
+              expression: "${date:now:yyyy-MM-dd'T'HH:mm:ss.SSSZ}"
+      - setProperty:
+          name: redeliveryCount
+          expression:
+            simple:
+              expression: "${header.JMSXDeliveryCount}"
+      - setProperty:
+          name: originalException
+          expression:
+            simple:
+              expression: "${header.CamelExceptionCaught}"
+
+      # -------------------------------------------------------------------------
+      # Step 2: Log the failure
+      # -------------------------------------------------------------------------
+      - log:
+          message: |
+            DLQ Message Received:
+            - File: ${exchangeProperty.originalFileName}
+            - CorrelationId: ${exchangeProperty.correlationId}
+            - Redelivery Count: ${exchangeProperty.redeliveryCount}
+            - Failure Time: ${exchangeProperty.failureTimestamp}
+            - Exception: ${exchangeProperty.originalException}
+          loggingLevel: ERROR
+          logName: dlq-handler
+
+      # -------------------------------------------------------------------------
+      # Step 3: Create failure report
+      # -------------------------------------------------------------------------
+      - setBody:
+          expression:
+            simple:
+              expression: |
+                {
+                  "status": "FAILED",
+                  "fileName": "${exchangeProperty.originalFileName}",
+                  "correlationId": "${exchangeProperty.correlationId}",
+                  "transferId": "${header.transferId}",
+                  "failureTimestamp": "${exchangeProperty.failureTimestamp}",
+                  "redeliveryCount": ${exchangeProperty.redeliveryCount},
+                  "exception": "${exchangeProperty.originalException}",
+                  "headers": {
+                    "contentType": "${header.contentType}",
+                    "fileSize": "${header.fileSize}",
+                    "checksum": "${header.checksum}"
+                  }
+                }
+
+      # -------------------------------------------------------------------------
+      # Step 4: Store failure report to S3
+      # -------------------------------------------------------------------------
+      - setHeader:
+          name: CamelAwsS3Key
+          expression:
+            simple:
+              expression: "failed/${date:now:yyyy/MM/dd}/${exchangeProperty.correlationId}/${exchangeProperty.originalFileName}.failure.json"
+      - setHeader:
+          name: CamelAwsS3ContentType
+          constant: application/json
+
+      - doTry:
+          steps:
+            - to:
+                uri: aws2-s3://{{s3.bucket.name}}
+                parameters:
+                  autoCreateBucket: "true"
+                  useDefaultCredentialsProvider: "false"
+                  overrideEndpoint: "true"
+                  uriEndpointOverride: "{{quarkus.s3.endpoint-override}}"
+                  region: "{{quarkus.s3.aws.region}}"
+
+            - log:
+                message: "Stored failure report to S3: ${header.CamelAwsS3Key}"
+                loggingLevel: INFO
+                logName: dlq-handler
+
+          doCatch:
+            - exception:
+                - java.lang.Exception
+              steps:
+                - log:
+                    message: "Failed to store failure report to S3: ${exception.message}"
+                    loggingLevel: ERROR
+                    logName: dlq-handler
+                # Don't rethrow - we don't want to lose the DLQ message
+
+      # -------------------------------------------------------------------------
+      # Step 5: Increment failure counter (for alerting)
+      # -------------------------------------------------------------------------
+      - to:
+          uri: micrometer:counter:file_pipeline_dlq_messages_total
+          parameters:
+            tags: "fileName=${exchangeProperty.originalFileName}"
+
+      - log:
+          message: "DLQ processing completed for: ${exchangeProperty.originalFileName}"
+          loggingLevel: INFO
+          logName: dlq-handler
+
+---
+# =============================================================================
+# DLQ Reprocessing Route (Manual Trigger)
+# =============================================================================
+# Allows manual reprocessing of DLQ messages via REST endpoint
+# Endpoint: POST /api/dlq/reprocess/{correlationId}
+# =============================================================================
+
+- route:
+    id: dlq-reprocess-route
+    description: "Manual reprocessing of failed messages"
+    autoStartup: true
+
+    from:
+      uri: direct:reprocess-dlq
+
+    steps:
+      - log:
+          message: "Manual reprocess requested for correlationId: ${header.correlationId}"
+          loggingLevel: INFO
+          logName: dlq-handler
+
+      # Fetch the original message from S3 failed folder
+      - setHeader:
+          name: CamelAwsS3Key
+          expression:
+            simple:
+              expression: "failed/${header.date}/${header.correlationId}/${header.fileName}.failure.json"
+
+      - doTry:
+          steps:
+            - to:
+                uri: aws2-s3://{{s3.bucket.name}}
+                parameters:
+                  operation: getObject
+                  useDefaultCredentialsProvider: "false"
+                  overrideEndpoint: "true"
+                  uriEndpointOverride: "{{quarkus.s3.endpoint-override}}"
+                  region: "{{quarkus.s3.aws.region}}"
+
+            - log:
+                message: "Found failure record, initiating reprocess"
+                loggingLevel: INFO
+                logName: dlq-handler
+
+            # TODO: Implement actual reprocessing logic
+            # This would involve:
+            # 1. Fetching original file from S3 incoming folder
+            # 2. Sending it back to the main queue
+            # 3. Updating the failure record status
+
+            - setBody:
+                expression:
+                  constant:
+                    expression: '{"status": "REPROCESS_INITIATED"}'
+
+          doCatch:
+            - exception:
+                - java.lang.Exception
+              steps:
+                - log:
+                    message: "Failed to initiate reprocess: ${exception.message}"
+                    loggingLevel: ERROR
+                    logName: dlq-handler
+                - setBody:
+                    expression:
+                      simple:
+                        expression: '{"status": "REPROCESS_FAILED", "error": "${exception.message}"}'

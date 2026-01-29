@@ -1,0 +1,42 @@
+---
+# ObjectBucketClaim for ODF S3-compatible storage
+apiVersion: objectbucket.io/v1alpha1
+kind: ObjectBucketClaim
+metadata:
+  name: file-pipeline-bucket
+  namespace: file-pipeline
+  labels:
+    app.kubernetes.io/name: s3-bucket
+    app.kubernetes.io/part-of: file-transfer-system
+spec:
+  generateBucketName: file-pipeline
+  storageClassName: openshift-storage.noobaa.io
+  additionalConfig:
+    bucketclass: noobaa-default-bucket-class
+---
+# This ConfigMap and Secret are automatically created by ODF when the OBC is provisioned:
+# - ConfigMap: file-pipeline-bucket (contains BUCKET_NAME, BUCKET_HOST, BUCKET_PORT)
+# - Secret: file-pipeline-bucket (contains AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+#
+# The Camel integration references these automatically provisioned resources.
+#
+# Example of what ODF creates:
+#
+# apiVersion: v1
+# kind: ConfigMap
+# metadata:
+#   name: file-pipeline-bucket
+# data:
+#   BUCKET_NAME: file-pipeline-xxx
+#   BUCKET_HOST: s3.openshift-storage.svc
+#   BUCKET_PORT: "443"
+#   BUCKET_REGION: ""
+#   BUCKET_SUBREGION: ""
+#
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: file-pipeline-bucket
+# data:
+#   AWS_ACCESS_KEY_ID: <base64>
+#   AWS_SECRET_ACCESS_KEY: <base64>

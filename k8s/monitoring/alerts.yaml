@@ -1,0 +1,175 @@
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: file-pipeline-alerts
+  namespace: file-pipeline
+  labels:
+    app.kubernetes.io/name: file-pipeline
+    app.kubernetes.io/part-of: file-transfer-system
+    prometheus: k8s
+    role: alert-rules
+spec:
+  groups:
+    # Camel Integration Alerts
+    - name: camel-integration
+      interval: 30s
+      rules:
+        - alert: CamelRouteDown
+          expr: up{job="camel-integration"} == 0
+          for: 2m
+          labels:
+            severity: critical
+            service: camel-integration
+          annotations:
+            summary: "Camel Integration is down"
+            description: "Camel Integration pod {{ $labels.pod }} has been down for more than 2 minutes."
+
+        - alert: CamelRouteHighErrorRate
+          expr: |
+            rate(camel_exchanges_failed_total{routeId="file-pipeline-route"}[5m])
+            / rate(camel_exchanges_total{routeId="file-pipeline-route"}[5m]) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+            service: camel-integration
+          annotations:
+            summary: "High error rate in Camel file pipeline route"
+            description: "Error rate is {{ $value | humanizePercentage }} for route {{ $labels.routeId }}."
+
+        - alert: CamelDLQBacklog
+          expr: |
+            artemis_message_count{address="file-transfer-dlq"} > 10
+          for: 10m
+          labels:
+            severity: warning
+            service: camel-integration
+          annotations:
+            summary: "Dead Letter Queue has accumulated messages"
+            description: "{{ $value }} messages in DLQ. Manual intervention may be required."
+
+        - alert: CamelHighProcessingTime
+          expr: |
+            histogram_quantile(0.95, rate(camel_exchange_processing_time_seconds_bucket{routeId="file-pipeline-route"}[5m])) > 60
+          for: 10m
+          labels:
+            severity: warning
+            service: camel-integration
+          annotations:
+            summary: "High processing time in Camel route"
+            description: "95th percentile processing time is {{ $value | humanizeDuration }} for route {{ $labels.routeId }}."
+
+    # Docling Alerts
+    - name: docling-service
+      interval: 30s
+      rules:
+        - alert: DoclingServiceDown
+          expr: up{job="docling-service"} == 0
+          for: 2m
+          labels:
+            severity: critical
+            service: docling
+          annotations:
+            summary: "Docling Service is down"
+            description: "Docling Service pod {{ $labels.pod }} has been down for more than 2 minutes."
+
+        - alert: DoclingHighLatency
+          expr: |
+            histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job="docling-service",path="/v1/convert/source"}[5m])) > 120
+          for: 10m
+          labels:
+            severity: warning
+            service: docling
+          annotations:
+            summary: "High latency in Docling document processing"
+            description: "95th percentile latency is {{ $value | humanizeDuration }}."
+
+        - alert: DoclingHighMemoryUsage
+          expr: |
+            container_memory_working_set_bytes{container="docling"}
+            / container_spec_memory_limit_bytes{container="docling"} > 0.9
+          for: 5m
+          labels:
+            severity: warning
+            service: docling
+          annotations:
+            summary: "Docling memory usage is high"
+            description: "Memory usage is {{ $value | humanizePercentage }} of limit."
+
+    # AMQ Broker Alerts
+    - name: amq-broker
+      interval: 30s
+      rules:
+        - alert: AMQBrokerDown
+          expr: |
+            kube_statefulset_status_replicas_ready{statefulset=~"file-pipeline-broker-ss.*"}
+            < kube_statefulset_status_replicas{statefulset=~"file-pipeline-broker-ss.*"}
+          for: 5m
+          labels:
+            severity: critical
+            service: amq-broker
+          annotations:
+            summary: "AMQ Broker replicas are not ready"
+            description: "StatefulSet {{ $labels.statefulset }} has {{ $value }} ready replicas."
+
+        - alert: AMQQueueBacklog
+          expr: |
+            artemis_message_count{address="file-transfer-queue"} > 1000
+          for: 15m
+          labels:
+            severity: warning
+            service: amq-broker
+          annotations:
+            summary: "Message backlog in file transfer queue"
+            description: "{{ $value }} messages pending in queue {{ $labels.address }}."
+
+        - alert: AMQHighDiskUsage
+          expr: |
+            artemis_disk_store_usage_percent > 80
+          for: 10m
+          labels:
+            severity: warning
+            service: amq-broker
+          annotations:
+            summary: "AMQ Broker disk usage is high"
+            description: "Disk usage is {{ $value }}%."
+
+    # S3/ODF Alerts
+    - name: s3-storage
+      interval: 60s
+      rules:
+        - alert: S3BucketHighUsage
+          expr: |
+            noobaa_bucket_usage_bytes{bucket_name=~"file-pipeline.*"}
+            / noobaa_bucket_quota_bytes{bucket_name=~"file-pipeline.*"} > 0.8
+          for: 30m
+          labels:
+            severity: warning
+            service: s3-storage
+          annotations:
+            summary: "S3 bucket storage usage is high"
+            description: "Bucket {{ $labels.bucket_name }} is at {{ $value | humanizePercentage }} capacity."
+
+    # Pod Health Alerts
+    - name: pod-health
+      interval: 30s
+      rules:
+        - alert: PodCrashLooping
+          expr: |
+            rate(kube_pod_container_status_restarts_total{namespace="file-pipeline"}[15m]) * 60 * 15 > 3
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod is crash looping"
+            description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} is restarting frequently."
+
+        - alert: PodNotReady
+          expr: |
+            kube_pod_status_ready{namespace="file-pipeline",condition="true"} == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod is not ready"
+            description: "Pod {{ $labels.pod }} has been not ready for more than 5 minutes."

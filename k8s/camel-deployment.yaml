@@ -1,0 +1,226 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: camel-integration
+  namespace: file-pipeline
+  labels:
+    app.kubernetes.io/name: camel-integration
+    app.kubernetes.io/component: message-processor
+    app.kubernetes.io/part-of: file-transfer-system
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: camel-integration
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: camel-integration
+        app.kubernetes.io/component: message-processor
+        app.kubernetes.io/part-of: file-transfer-system
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9000"
+        prometheus.io/path: "/q/metrics"
+    spec:
+      serviceAccountName: camel-integration
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: camel
+          image: image-registry.openshift-image-registry.svc:5000/file-pipeline/camel-integration:latest
+          imagePullPolicy: Always
+
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: management
+              containerPort: 9000
+              protocol: TCP
+
+          envFrom:
+            - configMapRef:
+                name: camel-config
+
+          env:
+            # AMQ Broker connection
+            - name: QUARKUS_ARTEMIS_URL
+              value: "tcp://$(AMQ_BROKER_HOST):$(AMQ_BROKER_PORT)"
+            - name: QUARKUS_ARTEMIS_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: amq-credentials
+                  key: AMQ_USER
+            - name: QUARKUS_ARTEMIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: amq-credentials
+                  key: AMQ_PASSWORD
+
+            # S3 credentials from OBC
+            - name: QUARKUS_S3_AWS_CREDENTIALS_STATIC_PROVIDER_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: file-pipeline-bucket
+                  key: AWS_ACCESS_KEY_ID
+            - name: QUARKUS_S3_AWS_CREDENTIALS_STATIC_PROVIDER_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: file-pipeline-bucket
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: S3_BUCKET_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: file-pipeline-bucket
+                  key: BUCKET_NAME
+
+            # OpenTelemetry configuration
+            - name: QUARKUS_OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otel-collector.openshift-distributed-tracing.svc:4317"
+            - name: QUARKUS_OTEL_SERVICE_NAME
+              value: "camel-integration"
+
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: management
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: management
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          startupProbe:
+            httpGet:
+              path: /q/health/started
+              port: management
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 100Mi
+
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: camel-integration
+                topologyKey: kubernetes.io/hostname
+
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: camel-integration
+
+---
+# ServiceAccount for Camel integration
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: camel-integration
+  namespace: file-pipeline
+  labels:
+    app.kubernetes.io/name: camel-integration
+    app.kubernetes.io/part-of: file-transfer-system
+
+---
+# HorizontalPodAutoscaler for Camel
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: camel-hpa
+  namespace: file-pipeline
+  labels:
+    app.kubernetes.io/name: camel-integration
+    app.kubernetes.io/part-of: file-transfer-system
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: camel-integration
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 30
+
+---
+# PodDisruptionBudget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: camel-pdb
+  namespace: file-pipeline
+  labels:
+    app.kubernetes.io/name: camel-integration
+    app.kubernetes.io/part-of: file-transfer-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: camel-integration

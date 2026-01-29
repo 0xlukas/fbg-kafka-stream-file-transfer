@@ -1,0 +1,277 @@
+# =============================================================================
+# File Pipeline Route - Main Processing Pipeline
+# =============================================================================
+# Single unified Camel route that:
+# 1. Consumes messages from AMQ Broker (file-transfer-queue)
+# 2. Extracts file metadata from JMS headers
+# 3. Uploads raw file to S3 (incoming folder)
+# 4. Calls Docling to process the document
+# 5. Stores the processed result to S3 (processed folder)
+# 6. Acknowledges message on success
+# =============================================================================
+
+- route:
+    id: file-pipeline-route
+    description: "Main file processing pipeline - AMQ to S3 to Docling"
+
+    from:
+      uri: jms:queue:file-transfer-queue
+      parameters:
+        acknowledgementModeName: CLIENT_ACKNOWLEDGE
+        maxConcurrentConsumers: "{{camel.component.jms.max-concurrent-consumers:5}}"
+
+    steps:
+      # -------------------------------------------------------------------------
+      # Step 1: Extract and preserve metadata from JMS headers
+      # -------------------------------------------------------------------------
+      - setProperty:
+          name: originalFileName
+          expression:
+            simple:
+              expression: "${header.fileName}"
+      - setProperty:
+          name: correlationId
+          expression:
+            simple:
+              expression: "${header.JMSCorrelationID}"
+      - setProperty:
+          name: contentType
+          expression:
+            simple:
+              expression: "${header.contentType}"
+      - setProperty:
+          name: fileSize
+          expression:
+            simple:
+              expression: "${header.fileSize}"
+      - setProperty:
+          name: transferId
+          expression:
+            simple:
+              expression: "${header.transferId}"
+      - setProperty:
+          name: checksum
+          expression:
+            simple:
+              expression: "${header.checksum}"
+      - setProperty:
+          name: rawFileContent
+          expression:
+            simple:
+              expression: "${body}"
+      - setProperty:
+          name: processingDate
+          expression:
+            simple:
+              expression: "${date:now:yyyy/MM/dd}"
+
+      - log:
+          message: "Processing file: ${exchangeProperty.originalFileName}, correlationId: ${exchangeProperty.correlationId}, size: ${exchangeProperty.fileSize} bytes"
+          loggingLevel: INFO
+          logName: file-pipeline
+
+      # -------------------------------------------------------------------------
+      # Step 2: Upload raw file to S3 (incoming folder)
+      # -------------------------------------------------------------------------
+      - setHeader:
+          name: CamelAwsS3Key
+          expression:
+            simple:
+              expression: "incoming/${exchangeProperty.processingDate}/${exchangeProperty.correlationId}/${exchangeProperty.originalFileName}"
+      - setHeader:
+          name: CamelAwsS3ContentType
+          expression:
+            simple:
+              expression: "${exchangeProperty.contentType}"
+
+      - doTry:
+          steps:
+            - to:
+                uri: aws2-s3://{{s3.bucket.name}}
+                parameters:
+                  autoCreateBucket: "true"
+                  useDefaultCredentialsProvider: "false"
+                  overrideEndpoint: "true"
+                  uriEndpointOverride: "{{quarkus.s3.endpoint-override}}"
+                  region: "{{quarkus.s3.aws.region}}"
+
+            - setProperty:
+                name: s3IncomingKey
+                expression:
+                  simple:
+                    expression: "${header.CamelAwsS3Key}"
+
+            - log:
+                message: "Uploaded raw file to S3: ${exchangeProperty.s3IncomingKey}"
+                loggingLevel: INFO
+                logName: file-pipeline
+
+          doCatch:
+            - exception:
+                - java.lang.Exception
+              steps:
+                - log:
+                    message: "Failed to upload file to S3: ${exception.message}"
+                    loggingLevel: ERROR
+                    logName: file-pipeline
+                - throwException:
+                    exceptionType: java.lang.RuntimeException
+                    message: "S3 upload failed: ${exception.message}"
+
+      # -------------------------------------------------------------------------
+      # Step 3: Call Docling to process the file
+      # -------------------------------------------------------------------------
+      - setBody:
+          expression:
+            simple:
+              expression: |
+                {
+                  "source": "s3://{{s3.bucket.name}}/${exchangeProperty.s3IncomingKey}",
+                  "options": {
+                    "from_format": null,
+                    "to_format": "json",
+                    "ocr": true,
+                    "table_structure": true
+                  }
+                }
+      - setHeader:
+          name: Content-Type
+          constant: application/json
+      - setHeader:
+          name: Accept
+          constant: application/json
+
+      - doTry:
+          steps:
+            # Circuit breaker wrapper for Docling call
+            - circuitBreaker:
+                configuration:
+                  delay: "{{docling.circuit-breaker.delay-ms:60000}}"
+                  failureRatio: "{{docling.circuit-breaker.failure-ratio:50}}"
+                  successThreshold: "{{docling.circuit-breaker.success-threshold:3}}"
+                steps:
+                  - to:
+                      uri: "http://{{docling.service.url}}/v1/convert/source"
+                      parameters:
+                        httpMethod: POST
+                        connectTimeout: "30000"
+                        socketTimeout: "{{docling.timeout.ms:300000}}"
+                onFallback:
+                  steps:
+                    - log:
+                        message: "Circuit breaker open - Docling service unavailable"
+                        loggingLevel: WARN
+                        logName: file-pipeline
+                    - throwException:
+                        exceptionType: java.lang.RuntimeException
+                        message: "Docling service circuit breaker is open"
+
+            - setProperty:
+                name: doclingResult
+                expression:
+                  simple:
+                    expression: "${body}"
+
+            - log:
+                message: "Docling processing completed for: ${exchangeProperty.originalFileName}"
+                loggingLevel: INFO
+                logName: file-pipeline
+
+          doCatch:
+            - exception:
+                - java.lang.Exception
+              onWhen:
+                simple: "${exception.message} contains 'circuit breaker'"
+              steps:
+                - log:
+                    message: "Docling circuit breaker triggered: ${exception.message}"
+                    loggingLevel: ERROR
+                    logName: file-pipeline
+                - throwException:
+                    exceptionType: java.lang.RuntimeException
+                    message: "Docling processing failed (circuit breaker): ${exception.message}"
+            - exception:
+                - java.lang.Exception
+              steps:
+                - log:
+                    message: "Docling processing failed: ${exception.message}"
+                    loggingLevel: ERROR
+                    logName: file-pipeline
+                - throwException:
+                    exceptionType: java.lang.RuntimeException
+                    message: "Docling processing failed: ${exception.message}"
+
+      # -------------------------------------------------------------------------
+      # Step 4: Store Docling result to S3 (processed folder)
+      # -------------------------------------------------------------------------
+      - setBody:
+          expression:
+            simple:
+              expression: "${exchangeProperty.doclingResult}"
+      - setHeader:
+          name: CamelAwsS3Key
+          expression:
+            simple:
+              expression: "processed/${exchangeProperty.processingDate}/${exchangeProperty.correlationId}/${exchangeProperty.originalFileName}.json"
+      - setHeader:
+          name: CamelAwsS3ContentType
+          constant: application/json
+
+      - doTry:
+          steps:
+            - to:
+                uri: aws2-s3://{{s3.bucket.name}}
+                parameters:
+                  autoCreateBucket: "true"
+                  useDefaultCredentialsProvider: "false"
+                  overrideEndpoint: "true"
+                  uriEndpointOverride: "{{quarkus.s3.endpoint-override}}"
+                  region: "{{quarkus.s3.aws.region}}"
+
+            - setProperty:
+                name: s3ProcessedKey
+                expression:
+                  simple:
+                    expression: "${header.CamelAwsS3Key}"
+
+            - log:
+                message: "Stored processed result to S3: ${exchangeProperty.s3ProcessedKey}"
+                loggingLevel: INFO
+                logName: file-pipeline
+
+          doCatch:
+            - exception:
+                - java.lang.Exception
+              steps:
+                - log:
+                    message: "Failed to store processed result to S3: ${exception.message}"
+                    loggingLevel: ERROR
+                    logName: file-pipeline
+                - throwException:
+                    exceptionType: java.lang.RuntimeException
+                    message: "S3 result upload failed: ${exception.message}"
+
+      # -------------------------------------------------------------------------
+      # Step 5: Log completion
+      # -------------------------------------------------------------------------
+      - log:
+          message: "Successfully processed file: ${exchangeProperty.originalFileName}, incoming: ${exchangeProperty.s3IncomingKey}, processed: ${exchangeProperty.s3ProcessedKey}"
+          loggingLevel: INFO
+          logName: file-pipeline
+
+    # ---------------------------------------------------------------------------
+    # Error Handler - Retry with exponential backoff, then DLQ
+    # ---------------------------------------------------------------------------
+    errorHandler:
+      deadLetterChannel:
+        deadLetterUri: jms:queue:{{error.dlq.name}}
+        useOriginalMessage: true
+        redeliveryPolicy:
+          maximumRedeliveries: "{{error.retry.max-attempts:3}}"
+          redeliveryDelay: "{{error.retry.delay-ms:5000}}"
+          backOffMultiplier: "{{error.retry.multiplier:2}}"
+          maximumRedeliveryDelay: "{{error.retry.max-delay-ms:60000}}"
+          retryAttemptedLogLevel: WARN
+          logRetryAttempted: true
+          logExhausted: true
+          logExhaustedMessageHistory: true

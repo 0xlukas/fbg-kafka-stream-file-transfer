@@ -1,0 +1,108 @@
+---
+apiVersion: broker.amq.io/v1beta1
+kind: ActiveMQArtemis
+metadata:
+  name: file-pipeline-broker
+  namespace: file-pipeline
+  labels:
+    app.kubernetes.io/name: amq-broker
+    app.kubernetes.io/part-of: file-transfer-system
+spec:
+  deploymentPlan:
+    size: 2
+    image: registry.redhat.io/amq7/amq-broker-rhel8:7.12
+    persistenceEnabled: true
+    journalType: nio
+    messageMigration: true
+    requireLogin: true
+    resources:
+      limits:
+        cpu: "2"
+        memory: 2Gi
+      requests:
+        cpu: 500m
+        memory: 1Gi
+    storage:
+      size: 10Gi
+      storageClassName: ocs-storagecluster-ceph-rbd
+
+  adminUser: admin
+  adminPassword: admin123  # Change in production - use Secret reference
+
+  acceptors:
+    # AMQP acceptor for GoAnywhere and modern clients
+    - name: amqp
+      protocols: amqp
+      port: 5672
+      connectionsAllowed: 100
+      expose: true
+      sslEnabled: true
+      sslSecret: amq-broker-tls
+
+    # OpenWire acceptor for legacy Java clients (GoAnywhere alternative)
+    - name: openwire
+      protocols: openwire
+      port: 61616
+      connectionsAllowed: 50
+      expose: true
+      sslEnabled: true
+      sslSecret: amq-broker-tls
+
+    # Core protocol for internal Camel connections
+    - name: core
+      protocols: core
+      port: 61617
+      connectionsAllowed: 20
+      expose: false
+      sslEnabled: false
+
+    # All protocols on single port (internal only)
+    - name: all
+      protocols: all
+      port: 61618
+      expose: false
+
+  connectors: []
+
+  console:
+    expose: true
+    sslEnabled: true
+
+  upgrades:
+    enabled: true
+    minor: true
+
+  # Address settings for dead letter and retry behavior
+  brokerProperties:
+    - "addressSettings.#.deadLetterAddress=file-transfer-dlq"
+    - "addressSettings.#.expiryAddress=file-transfer-expiry"
+    - "addressSettings.#.redeliveryDelay=5000"
+    - "addressSettings.#.maxDeliveryAttempts=3"
+    - "addressSettings.#.maxSizeBytes=104857600"
+    - "addressSettings.#.pageSizeBytes=10485760"
+    - "addressSettings.#.messageCounterHistoryDayLimit=10"
+
+---
+# TLS Secret for broker (create with actual certs in production)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: amq-broker-tls
+  namespace: file-pipeline
+type: kubernetes.io/tls
+stringData:
+  tls.crt: |
+    # Replace with actual certificate
+    -----BEGIN CERTIFICATE-----
+    # Certificate content here
+    -----END CERTIFICATE-----
+  tls.key: |
+    # Replace with actual private key
+    -----BEGIN PRIVATE KEY-----
+    # Private key content here
+    -----END PRIVATE KEY-----
+  ca.crt: |
+    # Replace with CA certificate
+    -----BEGIN CERTIFICATE-----
+    # CA certificate content here
+    -----END CERTIFICATE-----

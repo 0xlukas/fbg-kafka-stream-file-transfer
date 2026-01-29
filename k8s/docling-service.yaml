@@ -1,0 +1,23 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: docling-service
+  namespace: file-pipeline
+  labels:
+    app.kubernetes.io/name: docling
+    app.kubernetes.io/component: document-processor
+    app.kubernetes.io/part-of: file-transfer-system
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "5001"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: docling
+  ports:
+    - name: http
+      port: 5001
+      targetPort: http
+      protocol: TCP
+  sessionAffinity: None

@@ -1,0 +1,64 @@
+---
+# Main file transfer queue
+apiVersion: broker.amq.io/v1beta1
+kind: ActiveMQArtemisAddress
+metadata:
+  name: file-transfer-queue
+  namespace: file-pipeline
+  labels:
+    app.kubernetes.io/name: amq-address
+    app.kubernetes.io/part-of: file-transfer-system
+spec:
+  addressName: file-transfer-queue
+  queueName: file-transfer-queue
+  routingType: anycast
+  applyToCrNames:
+    - file-pipeline-broker
+---
+# Dead letter queue for failed messages
+apiVersion: broker.amq.io/v1beta1
+kind: ActiveMQArtemisAddress
+metadata:
+  name: file-transfer-dlq
+  namespace: file-pipeline
+  labels:
+    app.kubernetes.io/name: amq-address
+    app.kubernetes.io/part-of: file-transfer-system
+spec:
+  addressName: file-transfer-dlq
+  queueName: file-transfer-dlq
+  routingType: anycast
+  applyToCrNames:
+    - file-pipeline-broker
+---
+# Expiry queue for expired messages
+apiVersion: broker.amq.io/v1beta1
+kind: ActiveMQArtemisAddress
+metadata:
+  name: file-transfer-expiry
+  namespace: file-pipeline
+  labels:
+    app.kubernetes.io/name: amq-address
+    app.kubernetes.io/part-of: file-transfer-system
+spec:
+  addressName: file-transfer-expiry
+  queueName: file-transfer-expiry
+  routingType: anycast
+  applyToCrNames:
+    - file-pipeline-broker
+---
+# Notification queue for processing results
+apiVersion: broker.amq.io/v1beta1
+kind: ActiveMQArtemisAddress
+metadata:
+  name: file-transfer-notifications
+  namespace: file-pipeline
+  labels:
+    app.kubernetes.io/name: amq-address
+    app.kubernetes.io/part-of: file-transfer-system
+spec:
+  addressName: file-transfer-notifications
+  queueName: file-transfer-notifications
+  routingType: anycast
+  applyToCrNames:
+    - file-pipeline-broker

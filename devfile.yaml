@@ -1,0 +1,119 @@
+schemaVersion: 2.2.0
+metadata:
+  name: file-pipeline-camel
+  displayName: File Pipeline Camel Integration
+  description: Development environment for Camel Quarkus file pipeline
+  language: Java
+  projectType: Quarkus
+  version: 1.0.0
+
+components:
+  - name: tools
+    container:
+      image: registry.redhat.io/devspaces/udi-rhel8:latest
+      memoryLimit: 4Gi
+      memoryRequest: 1Gi
+      cpuLimit: "2000m"
+      cpuRequest: "500m"
+      mountSources: true
+      volumeMounts:
+        - name: m2
+          path: /home/user/.m2
+      endpoints:
+        - name: quarkus-dev
+          targetPort: 8080
+          exposure: public
+          protocol: https
+        - name: quarkus-debug
+          targetPort: 5005
+          exposure: internal
+        - name: quarkus-management
+          targetPort: 9000
+          exposure: internal
+      env:
+        - name: JAVA_HOME
+          value: /usr/lib/jvm/java-21-openjdk
+        - name: MAVEN_OPTS
+          value: "-Xmx1g -XX:+UseG1GC"
+        - name: QUARKUS_HTTP_HOST
+          value: "0.0.0.0"
+
+  - name: m2
+    volume:
+      size: 2Gi
+
+commands:
+  - id: build
+    exec:
+      component: tools
+      workingDir: ${PROJECT_SOURCE}/camel-integration
+      commandLine: mvn clean package -DskipTests
+      group:
+        kind: build
+        isDefault: true
+
+  - id: dev-mode
+    exec:
+      component: tools
+      workingDir: ${PROJECT_SOURCE}/camel-integration
+      commandLine: mvn quarkus:dev -Dquarkus.http.host=0.0.0.0
+      group:
+        kind: run
+        isDefault: true
+
+  - id: test
+    exec:
+      component: tools
+      workingDir: ${PROJECT_SOURCE}/camel-integration
+      commandLine: mvn test
+      group:
+        kind: test
+        isDefault: true
+
+  - id: native-build
+    exec:
+      component: tools
+      workingDir: ${PROJECT_SOURCE}/camel-integration
+      commandLine: mvn package -Pnative -DskipTests
+      group:
+        kind: build
+
+  - id: deploy-k8s
+    exec:
+      component: tools
+      workingDir: ${PROJECT_SOURCE}
+      commandLine: oc apply -k k8s/
+      group:
+        kind: deploy
+
+  - id: logs-camel
+    exec:
+      component: tools
+      commandLine: oc logs -f deployment/camel-integration -n file-pipeline
+      group:
+        kind: debug
+
+  - id: logs-docling
+    exec:
+      component: tools
+      commandLine: oc logs -f deployment/docling-service -n file-pipeline
+      group:
+        kind: debug
+
+attributes:
+  .vscode/extensions.json: |
+    {
+      "recommendations": [
+        "redhat.vscode-kaoto",
+        "redhat.java",
+        "redhat.vscode-quarkus",
+        "redhat.vscode-yaml",
+        "redhat.vscode-xml"
+      ]
+    }
+  .vscode/settings.json: |
+    {
+      "java.configuration.updateBuildConfiguration": "automatic",
+      "redhat.telemetry.enabled": false,
+      "quarkus.tools.alwaysShowWelcomePage": false
+    }
